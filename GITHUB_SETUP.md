@@ -29,7 +29,7 @@ git commit -m "Initial commit: Fake News Detection pipeline — BIT Mesra 2024"
 ## Step 3: Push to GitHub
 
 ```bash
-git remote add origin https://github.com/<YOUR_USERNAME>/fake-news-detector.git
+git remote add origin https://github.com/<Omjee R Giri>/fake-news-detector.git
 git branch -M main
 git push -u origin main
 ```

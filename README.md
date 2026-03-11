@@ -150,12 +150,6 @@ python -m pytest tests/ -v
 
 ---
 
-## 👤 Author
-
-**[Your Name]**
-B.Tech, Birla Institute of Technology, Mesra
-Academic Year: 2024
-
 ---
 
 ## 📄 License

@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TruthLens — Fake News Detector</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;500&family=Lora:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet" />
+
+  <style>
+    /* ── Reset & Variables ───────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #080b0f;
+      --surface:   #0e1318;
+      --surface2:  #141b22;
+      --border:    rgba(255,255,255,0.07);
+      --text:      #e8edf2;
+      --muted:     #6b7c8d;
+      --accent:    #00d4ff;
+      --real:      #00e5a0;
+      --real-dim:  rgba(0,229,160,0.12);
+      --fake:      #ff4455;
+      --fake-dim:  rgba(255,68,85,0.12);
+      --warn:      #ffb020;
+      --warn-dim:  rgba(255,176,32,0.12);
+      --glow-real: 0 0 40px rgba(0,229,160,0.2);
+      --glow-fake: 0 0 40px rgba(255,68,85,0.25);
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: 'Lora', Georgia, serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ── Noise texture overlay ───────────────────────────────── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Grid background ─────────────────────────────────────── */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(0,212,255,0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,212,255,0.025) 1px, transparent 1px);
+      background-size: 48px 48px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Layout ──────────────────────────────────────────────── */
+    .container {
+      position: relative;
+      z-index: 1;
+      max-width: 820px;
+      margin: 0 auto;
+      padding: 0 24px 80px;
+    }
+
+    /* ── Header ──────────────────────────────────────────────── */
+    header {
+      padding: 56px 0 48px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .logo-row {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .logo-icon {
+      width: 42px;
+      height: 42px;
+      background: linear-gradient(135deg, var(--accent), #0077ff);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      flex-shrink: 0;
+      box-shadow: 0 0 24px rgba(0,212,255,0.3);
+    }
+
+    h1 {
+      font-family: 'Syne', sans-serif;
+      font-size: clamp(28px, 5vw, 42px);
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      line-height: 1;
+      background: linear-gradient(120deg, #e8edf2 30%, var(--accent));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .tagline {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 12px;
+      color: var(--muted);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      padding-left: 56px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(0,212,255,0.08);
+      border: 1px solid rgba(0,212,255,0.2);
+      color: var(--accent);
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 4px;
+      letter-spacing: 0.06em;
+      margin-left: 56px;
+      width: fit-content;
+    }
+
+    .badge::before { content: '●'; font-size: 8px; }
+
+    /* ── Tab switcher ────────────────────────────────────────── */
+    .tabs {
+      display: flex;
+      gap: 2px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 4px;
+      margin-bottom: 24px;
+    }
+
+    .tab {
+      flex: 1;
+      padding: 10px 16px;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      font-family: 'Syne', sans-serif;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+      border-radius: 9px;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .tab:hover { color: var(--text); background: var(--surface2); }
+
+    .tab.active {
+      background: var(--surface2);
+      color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(0,212,255,0.2);
+    }
+
+    /* ── Input card ──────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px;
+      margin-bottom: 24px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(0,212,255,0.4), transparent);
+    }
+
+    .input-label {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+      display: block;
+    }
+
+    .input-wrap {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+    }
+
+    input[type="text"],
+    textarea {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--text);
+      font-family: 'Lora', serif;
+      font-size: 15px;
+      padding: 14px 16px;
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      resize: none;
+      line-height: 1.5;
+    }
+
+    input[type="text"]:focus,
+    textarea:focus {
+      border-color: rgba(0,212,255,0.4);
+      box-shadow: 0 0 0 3px rgba(0,212,255,0.08);
+    }
+
+    input[type="text"]::placeholder,
+    textarea::placeholder { color: var(--muted); font-style: italic; }
+
+    textarea { min-height: 100px; }
+
+    .btn-analyse {
+      background: linear-gradient(135deg, var(--accent), #0077ff);
+      color: #080b0f;
+      border: none;
+      border-radius: 10px;
+      padding: 14px 22px;
+      font-family: 'Syne', sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: opacity 0.2s, transform 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .btn-analyse:hover { opacity: 0.9; transform: translateY(-1px); }
+    .btn-analyse:active { transform: translateY(0); }
+    .btn-analyse:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    /* ── Loading state ───────────────────────────────────────── */
+    .spinner {
+      width: 16px; height: 16px;
+      border: 2px solid rgba(8,11,15,0.3);
+      border-top-color: #080b0f;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      display: none;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .loading .spinner { display: block; }
+    .loading .btn-icon { display: none; }
+
+    /* ── Result card ─────────────────────────────────────────── */
+    #result {
+      display: none;
+      animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    @keyframes slideUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    #result.visible { display: block; }
+
+    .result-card {
+      border-radius: 16px;
+      padding: 32px;
+      border: 1px solid;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .result-card.real {
+      background: var(--real-dim);
+      border-color: rgba(0,229,160,0.25);
+      box-shadow: var(--glow-real);
+    }
+
+    .result-card.fake {
+      background: var(--fake-dim);
+      border-color: rgba(255,68,85,0.25);
+      box-shadow: var(--glow-fake);
+    }
+
+    .result-card.medium {
+      background: var(--warn-dim);
+      border-color: rgba(255,176,32,0.25);
+    }
+
+    /* Corner decoration */
+    .result-card::after {
+      content: '';
+      position: absolute;
+      top: -60px; right: -60px;
+      width: 180px; height: 180px;
+      border-radius: 50%;
+      opacity: 0.06;
+    }
+    .result-card.real::after  { background: var(--real); }
+    .result-card.fake::after  { background: var(--fake); }
+
+    .verdict-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+    }
+
+    .verdict-main {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .verdict-icon {
+      font-size: 36px;
+      line-height: 1;
+      filter: drop-shadow(0 0 12px currentColor);
+    }
+
+    .verdict-text h2 {
+      font-family: 'Syne', sans-serif;
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      line-height: 1;
+    }
+
+    .real .verdict-text h2  { color: var(--real); }
+    .fake .verdict-text h2  { color: var(--fake); }
+    .medium .verdict-text h2 { color: var(--warn); }
+
+    .verdict-text p {
+      font-size: 13px;
+      color: var(--muted);
+      margin-top: 4px;
+      font-style: italic;
+    }
+
+    /* Risk gauge */
+    .risk-gauge {
+      text-align: right;
+      min-width: 120px;
+    }
+
+    .risk-pct {
+      font-family: 'Syne', sans-serif;
+      font-size: 36px;
+      font-weight: 800;
+      line-height: 1;
+    }
+
+    .real .risk-pct  { color: var(--real); }
+    .fake .risk-pct  { color: var(--fake); }
+    .medium .risk-pct { color: var(--warn); }
+
+    .risk-label {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    /* Progress bar */
+    .risk-bar-wrap {
+      background: rgba(255,255,255,0.06);
+      border-radius: 4px;
+      height: 6px;
+      overflow: hidden;
+      margin: 16px 0;
+    }
+
+    .risk-bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+      width: 0%;
+    }
+
+    .real  .risk-bar-fill { background: linear-gradient(90deg, var(--real), #00ffcc); }
+    .fake  .risk-bar-fill { background: linear-gradient(90deg, var(--fake), #ff8899); }
+    .medium .risk-bar-fill { background: linear-gradient(90deg, var(--warn), #ffe080); }
+
+    /* Article info */
+    .article-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+    }
+
+    .meta-row {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+    }
+
+    .meta-key {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      min-width: 72px;
+      padding-top: 2px;
+      flex-shrink: 0;
+    }
+
+    .meta-val {
+      font-size: 14px;
+      color: var(--text);
+      line-height: 1.5;
+    }
+
+    .meta-val.headline {
+      font-family: 'Lora', serif;
+      font-style: italic;
+      font-size: 15px;
+    }
+
+    .source-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+      color: var(--accent);
+    }
+
+    /* ── Error state ─────────────────────────────────────────── */
+    .error-card {
+      background: rgba(255,68,85,0.08);
+      border: 1px solid rgba(255,68,85,0.2);
+      border-radius: 12px;
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 14px;
+      color: #ff8899;
+    }
+
+    .error-card .err-icon { font-size: 18px; flex-shrink: 0; }
+
+    /* ── History ─────────────────────────────────────────────── */
+    .history-section {
+      margin-top: 40px;
+    }
+
+    .section-title {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .section-title::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    #history-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .history-item {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      animation: fadeIn 0.3s ease;
+    }
+
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+    .history-item:hover { background: var(--surface2); border-color: rgba(255,255,255,0.12); }
+
+    .history-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .history-dot.real { background: var(--real); box-shadow: 0 0 6px var(--real); }
+    .history-dot.fake { background: var(--fake); box-shadow: 0 0 6px var(--fake); }
+
+    .history-headline {
+      flex: 1;
+      font-size: 13px;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .history-score {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+      color: var(--muted);
+      flex-shrink: 0;
+    }
+
+    /* ── Footer ──────────────────────────────────────────────── */
+    footer {
+      margin-top: 60px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .footer-left {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .footer-left strong { color: var(--text); }
+
+    .model-pills {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .pill {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 3px 8px;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 10px;
+      color: var(--muted);
+      letter-spacing: 0.05em;
+    }
+
+    /* ── Responsive ──────────────────────────────────────────── */
+    @media (max-width: 580px) {
+      .input-wrap { flex-direction: column; }
+      .btn-analyse { width: 100%; justify-content: center; }
+      .verdict-row { flex-direction: column; }
+      .risk-gauge { text-align: left; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <!-- Header -->
+    <header>
+      <div class="logo-row">
+        <div class="logo-icon">🔍</div>
+        <h1>TruthLens</h1>
+      </div>
+      <p class="tagline">Fake News Detection System</p>
+      <span class="badge">BIT Mesra · Academic Project 2024</span>
+    </header>
+
+    <!-- Tab switcher -->
+    <div class="tabs">
+      <button class="tab active" id="tab-url" onclick="switchTab('url')">
+        <span>🌐</span> Verify by URL
+      </button>
+      <button class="tab" id="tab-text" onclick="switchTab('text')">
+        <span>📝</span> Verify by Text
+      </button>
+    </div>
+
+    <!-- URL input -->
+    <div class="card" id="panel-url">
+      <span class="input-label">News article URL</span>
+      <div class="input-wrap">
+        <input
+          type="text"
+          id="url-input"
+          placeholder="https://www.bbc.com/news/some-article"
+          autocomplete="off"
+          onkeydown="if(event.key==='Enter') analyse()"
+        />
+        <button class="btn-analyse" id="btn-url" onclick="analyse()">
+          <span class="spinner"></span>
+          <span class="btn-icon">→</span>
+          Analyse
+        </button>
+      </div>
+    </div>
+
+    <!-- Text input -->
+    <div class="card" id="panel-text" style="display:none;">
+      <span class="input-label">Paste headline or article text</span>
+      <div class="input-wrap">
+        <textarea
+          id="text-input"
+          placeholder="e.g. Scientists discover breakthrough cure for cancer in overnight trial..."
+        ></textarea>
+        <button class="btn-analyse" id="btn-text" onclick="analyseText()">
+          <span class="spinner"></span>
+          <span class="btn-icon">→</span>
+          Analyse
+        </button>
+      </div>
+    </div>
+
+    <!-- Result -->
+    <div id="result"></div>
+
+    <!-- History -->
+    <div class="history-section" id="history-section" style="display:none;">
+      <p class="section-title">Recent checks</p>
+      <div id="history-list"></div>
+    </div>
+
+    <!-- Footer -->
+    <footer>
+      <div class="footer-left">
+        <strong>TruthLens</strong> · Birla Institute of Technology, Mesra<br/>
+        TF-IDF + SVM text classification pipeline
+      </div>
+      <div class="model-pills">
+        <span class="pill">TF-IDF</span>
+        <span class="pill">Linear SVM</span>
+        <span class="pill">scikit-learn</span>
+        <span class="pill">Python</span>
+      </div>
+    </footer>
+
+  </div>
+
+  <script>
+    const history = [];
+    let currentTab = 'url';
+
+    function switchTab(tab) {
+      currentTab = tab;
+      document.getElementById('panel-url').style.display  = tab === 'url'  ? 'block' : 'none';
+      document.getElementById('panel-text').style.display = tab === 'text' ? 'block' : 'none';
+      document.getElementById('tab-url').classList.toggle('active',  tab === 'url');
+      document.getElementById('tab-text').classList.toggle('active', tab === 'text');
+      clearResult();
+    }
+
+    function clearResult() {
+      const el = document.getElementById('result');
+      el.classList.remove('visible');
+      el.style.display = 'none';
+      el.innerHTML = '';
+    }
+
+    function setLoading(btnId, loading) {
+      const btn = document.getElementById(btnId);
+      btn.disabled = loading;
+      btn.classList.toggle('loading', loading);
+    }
+
+    async function analyse() {
+      const url = document.getElementById('url-input').value.trim();
+      if (!url) return shake('url-input');
+      clearResult();
+      setLoading('btn-url', true);
+      try {
+        const res = await fetch('/api/verify-url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url }),
+        });
+        const data = await res.json();
+        if (!res.ok) showError(data.error || 'Something went wrong');
+        else         showResult(data);
+      } catch (e) {
+        showError('Network error — is the server running?');
+      } finally {
+        setLoading('btn-url', false);
+      }
+    }
+
+    async function analyseText() {
+      const text = document.getElementById('text-input').value.trim();
+      if (!text) return shake('text-input');
+      clearResult();
+      setLoading('btn-text', true);
+      try {
+        const res = await fetch('/api/verify-text', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+        const data = await res.json();
+        if (!res.ok) showError(data.error || 'Something went wrong');
+        else         showResult(data);
+      } catch (e) {
+        showError('Network error — is the server running?');
+      } finally {
+        setLoading('btn-text', false);
+      }
+    }
+
+    function showResult(data) {
+      const isFake   = data.is_fake;
+      const isMedium = !isFake && data.risk_level === 'MEDIUM';
+      const cls      = isFake ? 'fake' : (isMedium ? 'medium' : 'real');
+      const icon     = isFake ? '🔴' : (isMedium ? '🟡' : '🟢');
+      const label    = isFake ? 'FAKE NEWS' : (isMedium ? 'UNCERTAIN' : 'REAL NEWS');
+      const msg      = isFake
+        ? (data.risk_level === 'HIGH' ? 'Strong indicators of misinformation detected.' : 'Possible misinformation — verify with trusted sources.')
+        : (data.risk_level === 'LOW'  ? 'Content appears consistent with credible reporting.' : 'Likely real, but treat with moderate caution.');
+
+      const metaRows = [];
+      if (data.headline) metaRows.push(`
+        <div class="meta-row">
+          <span class="meta-key">Headline</span>
+          <span class="meta-val headline">${escHtml(data.headline)}</span>
+        </div>`);
+      if (data.source) metaRows.push(`
+        <div class="meta-row">
+          <span class="meta-key">Source</span>
+          <span class="meta-val"><span class="source-chip">🌐 ${escHtml(data.source)}</span></span>
+        </div>`);
+      if (data.preview) metaRows.push(`
+        <div class="meta-row">
+          <span class="meta-key">Preview</span>
+          <span class="meta-val" style="color:var(--muted);font-size:13px;">${escHtml(data.preview)}</span>
+        </div>`);
+
+      const html = `
+        <div class="result-card ${cls}">
+          <div class="verdict-row">
+            <div class="verdict-main">
+              <span class="verdict-icon">${icon}</span>
+              <div class="verdict-text">
+                <h2>${label}</h2>
+                <p>${msg}</p>
+              </div>
+            </div>
+            <div class="risk-gauge">
+              <div class="risk-pct">${data.risk_pct}%</div>
+              <div class="risk-label">fake probability</div>
+            </div>
+          </div>
+
+          <div class="risk-bar-wrap">
+            <div class="risk-bar-fill" id="bar-fill" style="width:0%"></div>
+          </div>
+
+          ${metaRows.length ? `<div class="article-meta">${metaRows.join('')}</div>` : ''}
+        </div>`;
+
+      const el = document.getElementById('result');
+      el.innerHTML = html;
+      el.style.display = 'block';
+      el.classList.add('visible');
+
+      // Animate bar
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const fill = document.getElementById('bar-fill');
+          if (fill) fill.style.width = data.risk_pct + '%';
+        });
+      });
+
+      // Add to history
+      addHistory(data);
+
+      // Scroll to result
+      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    function showError(msg) {
+      const el = document.getElementById('result');
+      el.innerHTML = `
+        <div class="error-card">
+          <span class="err-icon">⚠️</span>
+          <span>${escHtml(msg)}</span>
+        </div>`;
+      el.style.display = 'block';
+      el.classList.add('visible');
+    }
+
+    function addHistory(data) {
+      history.unshift(data);
+      if (history.length > 8) history.pop();
+
+      const section = document.getElementById('history-section');
+      const list    = document.getElementById('history-list');
+      section.style.display = 'block';
+
+      list.innerHTML = history.map((h, i) => `
+        <div class="history-item" onclick="reshow(${i})">
+          <div class="history-dot ${h.is_fake ? 'fake' : 'real'}"></div>
+          <span class="history-headline">${escHtml((h.headline || '—').substring(0, 80))}</span>
+          <span class="history-score">${h.risk_pct}% fake</span>
+        </div>`).join('');
+    }
+
+    function reshow(i) {
+      showResult(history[i]);
+    }
+
+    function shake(id) {
+      const el = document.getElementById(id);
+      el.style.animation = 'none';
+      el.offsetHeight;
+      el.style.animation = 'shake 0.4s ease';
+      el.focus();
+    }
+
+    function escHtml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    // Shake animation
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes shake {
+        0%,100% { transform: translateX(0); }
+        20%,60%  { transform: translateX(-6px); }
+        40%,80%  { transform: translateX(6px); }
+      }`;
+    document.head.appendChild(style);
+  </script>
+</body>
+</html>

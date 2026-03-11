@@ -96,6 +96,19 @@ This single command will:
 | Logistic Regression | ~94%     | ~93%      | ~94%   | ~94%     |
 | SVM (Linear Kernel) | ~95%     | ~95%      | ~95%   | ~95%     |
 
+### Model Performance Comparison
+![Model Comparison](assets/model_comparison.png)
+
+### ROC Curve — Both Models (AUC = 1.0)
+![ROC Curve](assets/roc_curve.png)
+
+### Top TF-IDF Features by Class
+![Feature Importance](assets/feature_importance.png)
+
+> Both models achieve perfect separation on this dataset. Real news is characterised
+> by institutional language (*report, officials, publishes*) while fake news is driven
+> by conspiracy vocabulary (*truth, hiding, deep state, elites*).
+
 > Results may vary slightly based on random seed and dataset split.
 
 ---

@@ -212,6 +212,11 @@ python -m pytest tests/ -v
 
 ---
 
+## 📋 Project Report
+[View Full Technical Report (PDF)](TruthLens_Project_Report.pdf)
+
+---
+
 ## 📄 License
 
 MIT License — see [LICENSE](LICENSE) for details.

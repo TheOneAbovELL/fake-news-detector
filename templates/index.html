@@ -747,75 +747,202 @@
       }
     }
 
-    function showResult(data) {
-      const isFake   = data.is_fake;
-      const isMedium = !isFake && data.risk_level === 'MEDIUM';
-      const cls      = isFake ? 'fake' : (isMedium ? 'medium' : 'real');
-      const icon     = isFake ? '🔴' : (isMedium ? '🟡' : '🟢');
-      const label    = isFake ? 'FAKE NEWS' : (isMedium ? 'UNCERTAIN' : 'REAL NEWS');
-      const msg      = isFake
-        ? (data.risk_level === 'HIGH' ? 'Strong indicators of misinformation detected.' : 'Possible misinformation — verify with trusted sources.')
-        : (data.risk_level === 'LOW'  ? 'Content appears consistent with credible reporting.' : 'Likely real, but treat with moderate caution.');
+function showResult(data) {
+  const isFake   = data.is_fake;
+  const isMedium = !isFake && data.risk_level === 'MEDIUM';
+  const cls      = isFake ? 'fake' : (isMedium ? 'medium' : 'real');
+  const icon     = isFake ? '🚨' : (isMedium ? '⚠️' : '✅');
+  const label    = isFake ? 'FAKE NEWS' : (isMedium ? 'UNCERTAIN' : 'REAL NEWS');
+  const msg      = data.summary || (
+    isFake
+      ? 'Strong indicators of misinformation detected.'
+      : 'Content appears consistent with credible reporting.'
+  );
 
-      const metaRows = [];
-      if (data.headline) metaRows.push(`
-        <div class="meta-row">
-          <span class="meta-key">Headline</span>
-          <span class="meta-val headline">${escHtml(data.headline)}</span>
-        </div>`);
-      if (data.source) metaRows.push(`
-        <div class="meta-row">
-          <span class="meta-key">Source</span>
-          <span class="meta-val"><span class="source-chip">🌐 ${escHtml(data.source)}</span></span>
-        </div>`);
-      if (data.preview) metaRows.push(`
-        <div class="meta-row">
-          <span class="meta-key">Preview</span>
-          <span class="meta-val" style="color:var(--muted);font-size:13px;">${escHtml(data.preview)}</span>
-        </div>`);
+  // ── LLM verdict badge ──
+  const llmBadge = data.llm_verdict ? `
+    <div style="margin-bottom:12px;">
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;
+                   letter-spacing:0.1em;color:var(--muted);">AI VERDICT: </span>
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;
+                   color:var(--accent);">${escHtml(data.llm_verdict)}</span>
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;
+                   color:var(--muted);margin-left:10px;">
+        CREDIBILITY ${data.credibility_score}/100 · CONFIDENCE ${data.llm_confidence}/100
+      </span>
+    </div>` : '';
 
-      const html = `
-        <div class="result-card ${cls}">
-          <div class="verdict-row">
-            <div class="verdict-main">
-              <span class="verdict-icon">${icon}</span>
-              <div class="verdict-text">
-                <h2>${label}</h2>
-                <p>${msg}</p>
-              </div>
-            </div>
-            <div class="risk-gauge">
-              <div class="risk-pct">${data.risk_pct}%</div>
-              <div class="risk-label">fake probability</div>
-            </div>
+  // ── Red flags ──
+  const redFlags = (data.red_flags && data.red_flags.length) ? `
+    <div style="margin-top:16px;">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;
+                  letter-spacing:0.1em;color:#ff4455;margin-bottom:8px;">
+        🔴 RED FLAGS
+      </div>
+      ${data.red_flags.map(f => `
+        <div style="padding:7px 12px;margin-bottom:5px;
+                    border-left:2px solid #ff4455;
+                    background:rgba(255,68,85,0.06);
+                    border-radius:0 6px 6px 0;
+                    font-size:13px;color:var(--muted);line-height:1.5;">
+          ◆ ${escHtml(f)}
+        </div>`).join('')}
+    </div>` : '';
+
+  // ── Green flags ──
+  const greenFlags = (data.green_flags && data.green_flags.length) ? `
+    <div style="margin-top:12px;">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;
+                  letter-spacing:0.1em;color:#00e5a0;margin-bottom:8px;">
+        🟢 CREDIBILITY SIGNALS
+      </div>
+      ${data.green_flags.map(f => `
+        <div style="padding:7px 12px;margin-bottom:5px;
+                    border-left:2px solid #00e5a0;
+                    background:rgba(0,229,160,0.06);
+                    border-radius:0 6px 6px 0;
+                    font-size:13px;color:var(--muted);line-height:1.5;">
+          ◆ ${escHtml(f)}
+        </div>`).join('')}
+    </div>` : '';
+
+  // ── Manipulation techniques ──
+  const techniques = (data.detected_techniques && data.detected_techniques.length) ? `
+    <div style="margin-top:12px;">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;
+                  letter-spacing:0.1em;color:#ffb020;margin-bottom:8px;">
+        🎭 MANIPULATION TECHNIQUES
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;">
+        ${data.detected_techniques.map(t => `
+          <span style="background:rgba(255,68,85,0.1);
+                       border:1px solid rgba(255,68,85,0.25);
+                       border-radius:20px;padding:3px 12px;
+                       font-size:12px;color:#ff8899;">
+            ${escHtml(t)}
+          </span>`).join('')}
+      </div>
+    </div>` : '';
+
+  // ── Reasoning ──
+  const reasoning = data.reasoning ? `
+    <div style="margin-top:16px;padding:14px 16px;
+                background:rgba(255,255,255,0.03);
+                border:1px solid var(--border);border-radius:10px;">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;
+                  letter-spacing:0.1em;color:var(--muted);margin-bottom:8px;">
+        🧠 AI REASONING
+      </div>
+      <div style="font-size:13px;color:var(--muted);line-height:1.8;font-style:italic;">
+        ${escHtml(data.reasoning)}
+      </div>
+    </div>` : '';
+
+  // ── Fact check suggestions ──
+  const factCheck = (data.fact_check_suggestions && data.fact_check_suggestions.length) ? `
+    <div style="margin-top:12px;">
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:10px;
+                  letter-spacing:0.1em;color:var(--muted);margin-bottom:8px;">
+        🔎 CLAIMS TO VERIFY
+      </div>
+      ${data.fact_check_suggestions.map((claim, i) => `
+        <div style="padding:10px 14px;margin-bottom:8px;
+                    background:rgba(255,255,255,0.02);
+                    border:1px solid var(--border);border-radius:8px;">
+          <div style="font-size:13px;color:var(--muted);margin-bottom:8px;line-height:1.5;">
+            ${i+1}. ${escHtml(claim)}
           </div>
-
-          <div class="risk-bar-wrap">
-            <div class="risk-bar-fill" id="bar-fill" style="width:0%"></div>
+          <div style="display:flex;gap:8px;">
+            <a href="https://www.snopes.com/search/#${encodeURIComponent(claim)}"
+               target="_blank"
+               style="font-size:11px;color:var(--accent);text-decoration:none;
+                      padding:3px 10px;border:1px solid rgba(0,212,255,0.25);border-radius:4px;">
+              Snopes →
+            </a>
+            <a href="https://www.factcheck.org/?s=${encodeURIComponent(claim)}"
+               target="_blank"
+               style="font-size:11px;color:var(--accent);text-decoration:none;
+                      padding:3px 10px;border:1px solid rgba(0,212,255,0.25);border-radius:4px;">
+              FactCheck →
+            </a>
+            <a href="https://www.google.com/search?q=fact+check+${encodeURIComponent(claim)}"
+               target="_blank"
+               style="font-size:11px;color:var(--accent);text-decoration:none;
+                      padding:3px 10px;border:1px solid rgba(0,212,255,0.25);border-radius:4px;">
+              Google →
+            </a>
           </div>
+        </div>`).join('')}
+    </div>` : '';
 
-          ${metaRows.length ? `<div class="article-meta">${metaRows.join('')}</div>` : ''}
-        </div>`;
+  // ── Article meta rows ──
+  const metaRows = [];
+  if (data.headline) metaRows.push(`
+    <div class="meta-row">
+      <span class="meta-key">Headline</span>
+      <span class="meta-val headline">${escHtml(data.headline)}</span>
+    </div>`);
+  if (data.source) metaRows.push(`
+    <div class="meta-row">
+      <span class="meta-key">Source</span>
+      <span class="meta-val"><span class="source-chip">🌐 ${escHtml(data.source)}</span></span>
+    </div>`);
+  if (data.preview) metaRows.push(`
+    <div class="meta-row">
+      <span class="meta-key">Preview</span>
+      <span class="meta-val" style="color:var(--muted);font-size:13px;">${escHtml(data.preview)}</span>
+    </div>`);
 
-      const el = document.getElementById('result');
-      el.innerHTML = html;
-      el.style.display = 'block';
-      el.classList.add('visible');
+  const analysisSrc = data.analysis_source === 'groq+ml'
+    ? '<span style="font-size:10px;color:var(--accent);font-family:\'IBM Plex Mono\',monospace;">⚡ Groq LLM + ML</span>'
+    : '<span style="font-size:10px;color:var(--muted);font-family:\'IBM Plex Mono\',monospace;">ML only</span>';
 
-      // Animate bar
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          const fill = document.getElementById('bar-fill');
-          if (fill) fill.style.width = data.risk_pct + '%';
-        });
-      });
+  const html = `
+    <div class="result-card ${cls}">
+      <div style="position:absolute;top:12px;right:16px;">${analysisSrc}</div>
+      <div class="verdict-row">
+        <div class="verdict-main">
+          <span class="verdict-icon">${icon}</span>
+          <div class="verdict-text">
+            <h2>${label}</h2>
+            <p>${escHtml(msg)}</p>
+          </div>
+        </div>
+        <div class="risk-gauge">
+          <div class="risk-pct">${data.risk_pct}%</div>
+          <div class="risk-label">fake probability</div>
+        </div>
+      </div>
 
-      // Add to history
-      addHistory(data);
+      <div class="risk-bar-wrap">
+        <div class="risk-bar-fill" id="bar-fill" style="width:0%"></div>
+      </div>
 
-      // Scroll to result
-      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }
+      ${llmBadge}
+      ${redFlags}
+      ${greenFlags}
+      ${techniques}
+      ${reasoning}
+      ${factCheck}
+
+      ${metaRows.length ? `<div class="article-meta" style="margin-top:16px;">${metaRows.join('')}</div>` : ''}
+    </div>`;
+
+  const el = document.getElementById('result');
+  el.innerHTML = html;
+  el.style.display = 'block';
+  el.classList.add('visible');
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const fill = document.getElementById('bar-fill');
+      if (fill) fill.style.width = data.risk_pct + '%';
+    });
+  });
+
+  addHistory(data);
+  el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
 
     function showError(msg) {
       const el = document.getElementById('result');

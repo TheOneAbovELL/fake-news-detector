@@ -49,3 +49,5 @@ reports/*.csv
 notebooks/*.ipynb
 {data/
 GITHUB_SETUP.md
+
+.env

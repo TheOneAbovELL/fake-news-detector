@@ -6,13 +6,14 @@ Implements Logistic Regression and SVM classifiers.
 """
 
 import os
+from typing import Any, Dict
+
 import joblib
 import numpy as np
-from sklearn.linear_model import LogisticRegression
-from sklearn.svm import LinearSVC
 from sklearn.calibration import CalibratedClassifierCV
-from sklearn.model_selection import cross_val_score
-from typing import Dict, Any
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.svm import LinearSVC
 
 
 class FakeNewsClassifier:
@@ -33,7 +34,8 @@ class FakeNewsClassifier:
         model_type : str
             One of 'logistic_regression' or 'svm'.
         **kwargs
-            Passed to the underlying sklearn estimator.
+            Passed to the underlying sklearn estimator. ``class_weight``
+            defaults to "balanced" because real news outnumbers fake ~3:1.
         """
         assert model_type in self.SUPPORTED_MODELS, \
             f"model_type must be one of {self.SUPPORTED_MODELS}"
@@ -46,15 +48,16 @@ class FakeNewsClassifier:
         if model_type == "logistic_regression":
             return LogisticRegression(
                 C=kwargs.get("C", 1.0),
-                max_iter=kwargs.get("max_iter", 1000),
+                max_iter=kwargs.get("max_iter", 2000),
                 solver="lbfgs",
-                n_jobs=-1,
+                class_weight=kwargs.get("class_weight", "balanced"),
                 random_state=42,
             )
         elif model_type == "svm":
             base_svm = LinearSVC(
                 C=kwargs.get("C", 1.0),
-                max_iter=kwargs.get("max_iter", 2000),
+                max_iter=kwargs.get("max_iter", 5000),
+                class_weight=kwargs.get("class_weight", "balanced"),
                 random_state=42,
             )
             # Wrap in CalibratedClassifierCV to get predict_proba
@@ -62,7 +65,8 @@ class FakeNewsClassifier:
 
     def train(self, X_train, y_train, cv: bool = True) -> Dict[str, Any]:
         """
-        Fit the model. Optionally run 5-fold cross-validation.
+        Fit the model. Optionally run stratified 5-fold cross-validation
+        (ROC-AUC, which is meaningful under class imbalance).
 
         Returns dict with training metrics.
         """
@@ -72,14 +76,15 @@ class FakeNewsClassifier:
 
         results = {}
         if cv:
-            print(f"[Model] Running 5-fold cross-validation...")
+            print("[Model] Running stratified 5-fold cross-validation (ROC-AUC)...")
             cv_scores = cross_val_score(
                 self.model, X_train, y_train,
-                cv=5, scoring="accuracy", n_jobs=-1
+                cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=42),
+                scoring="roc_auc", n_jobs=-1
             )
             results["cv_mean"] = cv_scores.mean()
             results["cv_std"] = cv_scores.std()
-            print(f"[Model] CV Accuracy: {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
+            print(f"[Model] CV ROC-AUC: {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
 
         return results
 

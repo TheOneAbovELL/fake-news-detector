@@ -5,13 +5,15 @@ All visualization utilities for the Fake News Detection project.
 """
 
 import os
-import numpy as np
+
 import matplotlib
+import numpy as np
+
 matplotlib.use("Agg")
+from typing import Dict, List, Tuple
+
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import seaborn as sns
-from typing import List, Dict, Tuple
 
 # ── Style configuration ─────────────────────────────────────────────────────
 sns.set_theme(style="whitegrid", palette="muted", font_scale=1.1)
@@ -49,7 +51,7 @@ def plot_class_distribution(y, save_path: str):
     bars = axes[0].bar(labels, counts, color=colors, edgecolor="white", linewidth=1.5, width=0.5)
     axes[0].set_title("Sample Count per Class")
     axes[0].set_ylabel("Number of Samples")
-    for bar, count in zip(bars, counts):
+    for bar, count in zip(bars, counts, strict=True):
         axes[0].text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 20,
                      f"{count:,}", ha="center", va="bottom", fontweight="bold")
     axes[0].set_ylim(0, max(counts) * 1.15)
@@ -111,7 +113,7 @@ def plot_roc_curves(roc_data: Dict[str, Tuple], save_path: str):
     fig, ax = plt.subplots(figsize=(8, 7))
     colors = [REAL_COLOR, FAKE_COLOR, NEUTRAL_COLOR]
 
-    for (name, (fpr, tpr, auc)), color in zip(roc_data.items(), colors):
+    for (name, (fpr, tpr, auc)), color in zip(roc_data.items(), colors, strict=False):
         ax.plot(fpr, tpr, color=color, lw=2.5,
                 label=f"{name}  (AUC = {auc:.4f})")
         ax.fill_between(fpr, tpr, alpha=0.05, color=color)
@@ -138,30 +140,44 @@ def plot_roc_curves(roc_data: Dict[str, Tuple], save_path: str):
 # ── 4. Feature importance ────────────────────────────────────────────────────
 
 def plot_feature_importance(top_real: List[str], top_fake: List[str],
-                             save_path: str, n_show: int = 15):
+                            save_path: str, n_show: int = 15,
+                            real_weights: List[float] = None,
+                            fake_weights: List[float] = None,
+                            xlabel: str = "Model coefficient (|weight|)"):
+    """
+    Horizontal bar charts of the most class-indicative terms.
+
+    When weights are given (e.g. logistic-regression coefficients) bar length is
+    the weight magnitude; otherwise bars show rank only.
+    """
     top_real = top_real[:n_show]
     top_fake = top_fake[:n_show]
-    fig, axes = plt.subplots(1, 2, figsize=(14, 7))
-    fig.suptitle("Top TF-IDF Features by Class", fontsize=16, fontweight="bold")
+    if real_weights is None or fake_weights is None:
+        real_vals = list(range(len(top_real), 0, -1))
+        fake_vals = list(range(len(top_fake), 0, -1))
+        xlabel = "Rank (higher = more important)"
+    else:
+        real_vals = [abs(w) for w in real_weights[:n_show]]
+        fake_vals = [abs(w) for w in fake_weights[:n_show]]
 
-    # Real news features
-    y_pos = range(len(top_real))
-    axes[0].barh(y_pos, range(len(top_real), 0, -1),
+    fig, axes = plt.subplots(1, 2, figsize=(14, 7))
+    fig.suptitle("Most Indicative Terms by Class", fontsize=16, fontweight="bold")
+
+    axes[0].barh(range(len(top_real)), real_vals,
                  color=REAL_COLOR, alpha=0.8, edgecolor="white")
-    axes[0].set_yticks(y_pos)
+    axes[0].set_yticks(range(len(top_real)))
     axes[0].set_yticklabels(top_real, fontsize=10)
-    axes[0].set_title("Top Features → Real News", color=REAL_COLOR, fontweight="bold")
-    axes[0].set_xlabel("TF-IDF Rank (higher = more important)")
+    axes[0].set_title("Terms → Real News", color=REAL_COLOR, fontweight="bold")
+    axes[0].set_xlabel(xlabel)
     axes[0].invert_xaxis()
     axes[0].invert_yaxis()
 
-    # Fake news features
-    axes[1].barh(y_pos, range(len(top_fake), 0, -1),
+    axes[1].barh(range(len(top_fake)), fake_vals,
                  color=FAKE_COLOR, alpha=0.8, edgecolor="white")
-    axes[1].set_yticks(y_pos)
+    axes[1].set_yticks(range(len(top_fake)))
     axes[1].set_yticklabels(top_fake, fontsize=10)
-    axes[1].set_title("Top Features → Fake News", color=FAKE_COLOR, fontweight="bold")
-    axes[1].set_xlabel("TF-IDF Rank (higher = more important)")
+    axes[1].set_title("Terms → Fake News", color=FAKE_COLOR, fontweight="bold")
+    axes[1].set_xlabel(xlabel)
     axes[1].invert_yaxis()
 
     plt.tight_layout()
@@ -196,7 +212,7 @@ def plot_model_comparison(comparison_df, save_path: str):
 
     ax.set_xticks(x)
     ax.set_xticklabels(available, fontsize=11)
-    ax.set_ylim(0.75, 1.02)
+    ax.set_ylim(0, 1.08)
     ax.set_ylabel("Score", fontsize=12)
     ax.set_title("Model Performance Comparison", fontsize=14, fontweight="bold")
     ax.legend(fontsize=11)
@@ -248,7 +264,7 @@ def plot_risk_score_distribution(y_true, risk_scores: np.ndarray,
 # ── 7. Learning curve ────────────────────────────────────────────────────────
 
 def plot_learning_curve(train_sizes, train_scores, val_scores,
-                         model_name: str, save_path: str):
+                        model_name: str, save_path: str, metric: str = "ROC-AUC"):
     train_mean = np.mean(train_scores, axis=1)
     train_std  = np.std(train_scores, axis=1)
     val_mean   = np.mean(val_scores, axis=1)
@@ -265,7 +281,7 @@ def plot_learning_curve(train_sizes, train_scores, val_scores,
                     alpha=0.15, color=FAKE_COLOR)
 
     ax.set_xlabel("Training Set Size", fontsize=12)
-    ax.set_ylabel("Accuracy", fontsize=12)
+    ax.set_ylabel(metric, fontsize=12)
     ax.set_title(f"Learning Curve — {model_name}", fontsize=14, fontweight="bold")
     ax.legend(fontsize=11)
     ax.grid(alpha=0.3)

@@ -1,237 +1,305 @@
 """
 app.py
-Flask web application for the Fake News Detection System.
+------
+Flask web application for TruthLens.
 
-Run with:
-    python app.py
-Then open: http://localhost:5000
+Development:
+    python app.py                         → http://localhost:5000
+Production (any OS):
+    waitress-serve --listen=0.0.0.0:8000 --call app:create_app
 """
 
+import hashlib
+import ipaddress
+import logging
 import os
-from dotenv import load_dotenv
-load_dotenv()
+import re
 import sys
-import warnings
-warnings.filterwarnings("ignore")
+import threading
+import time
+import uuid
+from collections import defaultdict, deque
 
-sys.path.insert(0, os.path.dirname(__file__))
+from dotenv import load_dotenv
+from flask import Flask, g, jsonify, render_template, request
+from werkzeug.exceptions import HTTPException
 
-from flask import Flask, render_template, request, jsonify
-from src.preprocessor import clean_text
-from src.features     import TFIDFExtractor
-from src.models       import FakeNewsClassifier
-from src.scraper      import scrape_article, validate_url
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import requests
-import json
+from src import __version__  # noqa: E402
+from src.analysis import Analyzer  # noqa: E402
+from src.config import Settings  # noqa: E402
+from src.llm import GroqClient  # noqa: E402
+from src.predict import ModelNotFoundError, Predictor  # noqa: E402
+from src.scraper import scrape_article, validate_url  # noqa: E402
 
-app = Flask(__name__)
+log = logging.getLogger("truthlens")
 
-# ── Groq LLM config ──────────────────────────────────────────────────────────
-GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL    = "llama-3.3-70b-versatile"
-GROQ_API_KEY  = os.environ.get("GROQ_API_KEY", "")  # set via env variable
+MIN_TEXT_CHARS = 5
+MAX_URL_CHARS = 2048
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
-# ── Load models once at startup ───────────────────────────────────────────────
-MODEL_PATH      = os.path.join("models", "svm_linear.pkl")
-VECTORIZER_PATH = os.path.join("models", "tfidf_vectorizer.pkl")
+CONTENT_SECURITY_POLICY = "; ".join([
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com",
+    "img-src 'self' data:",
+    "connect-src 'self'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+])
 
-vectorizer = None
-classifier = None
 
-def groq_analyse(text: str, mode: str = "text", extra_context: dict = None) -> dict:
+def _asset_version(static_dir: str) -> str:
+    """Short content hash of the static files, for cache-busting URLs."""
+    digest = hashlib.sha256()
+    for name in sorted(os.listdir(static_dir)):
+        path = os.path.join(static_dir, name)
+        if os.path.isfile(path):
+            with open(path, "rb") as fh:
+                digest.update(fh.read())
+    return digest.hexdigest()[:10]
+
+
+class RateLimiter:
+    """Sliding-window limiter, per client key, in process memory.
+
+    Good enough for a single-process deployment; behind several workers or
+    replicas each process enforces its own budget (use a shared store such as
+    Redis, or the reverse proxy's limiter, for a strict global limit).
     """
-    Send text to Groq LLaMA-3.3-70b for deep fake news analysis.
-    Returns structured dict with verdict, scores, flags, reasoning.
-    Falls back gracefully if API key missing or call fails.
-    """
-    if not GROQ_API_KEY:
-        return None  # no key = skip LLM layer, use ML only
 
-    context_block = ""
-    if extra_context:
-        context_block = f"""
-SOURCE DOMAIN : {extra_context.get('source', 'unknown')}
-HEADLINE      : {extra_context.get('headline', '')}
-PREVIEW       : {extra_context.get('preview', '')}
-"""
+    def __init__(self, limit: int, window: float = 60.0):
+        self.limit = limit
+        self.window = window
+        self._hits = defaultdict(deque)
+        self._lock = threading.Lock()
+        self._last_sweep = time.monotonic()
 
-    system_prompt = (
-        "You are an expert fact-checker and misinformation analyst. "
-        "Respond ONLY with a valid JSON object — no markdown, no explanation outside JSON."
-    )
+    @staticmethod
+    def client_key(remote_addr: str) -> str:
+        """Group IPv6 clients by /64 — one host can rotate through a whole /64."""
+        try:
+            ip = ipaddress.ip_address(remote_addr)
+        except ValueError:
+            return remote_addr or "unknown"
+        if ip.version == 6:
+            if ip.ipv4_mapped:
+                return str(ip.ipv4_mapped)
+            return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+        return str(ip)
 
-    user_prompt = f"""Analyse this {'news article' if mode == 'url' else 'text'} for credibility and misinformation.
+    def _sweep(self, now: float):
+        """Forget clients with no hits inside the window (bounds memory)."""
+        for k in [k for k, q in self._hits.items() if not q or now - q[-1] >= self.window]:
+            del self._hits[k]
+        self._last_sweep = now
 
-{context_block}
-TEXT TO ANALYSE:
-{text[:3000]}
-
-Return EXACTLY this JSON structure:
-{{
-  "verdict": "REAL" or "LIKELY REAL" or "UNCERTAIN" or "LIKELY FAKE" or "FAKE",
-  "confidence": <integer 0-100>,
-  "credibility_score": <integer 0-100>,
-  "summary": "<2-3 sentence plain English explanation>",
-  "red_flags": ["<specific red flag found in the text>"],
-  "green_flags": ["<specific credibility signal found>"],
-  "detected_techniques": ["<manipulation technique name if found>"],
-  "fact_check_suggestions": ["<specific claim to independently verify>"],
-  "reasoning": "<detailed 3-5 sentence analysis of why this verdict>"
-}}"""
-
-    try:
-        response = requests.post(
-            GROQ_ENDPOINT,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-            },
-            json={
-                "model": GROQ_MODEL,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": user_prompt},
-                ],
-                "temperature": 0.1,
-                "max_tokens": 1200,
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-        raw   = response.json()["choices"][0]["message"]["content"]
-        clean = raw.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean)
-    except Exception as e:
-        print(f"[Groq] LLM call failed: {e}")
-        return None  # fail silently, ML result still returned
-    
-
-def load_models():
-    global vectorizer, classifier
-    if not os.path.exists(MODEL_PATH) or not os.path.exists(VECTORIZER_PATH):
-        print("\n❌  Models not found! Run  python main.py  first.\n")
-        sys.exit(1)
-    vectorizer = TFIDFExtractor.load(VECTORIZER_PATH)
-    classifier = FakeNewsClassifier.load(MODEL_PATH, "svm")
-    print("✅  Models loaded successfully.")
+    def hit(self, key: str) -> float:
+        """Record a request; return 0 if allowed, else seconds until retry."""
+        if self.limit <= 0:
+            return 0.0
+        now = time.monotonic()
+        with self._lock:
+            if now - self._last_sweep >= self.window:
+                self._sweep(now)
+            q = self._hits[key]
+            while q and now - q[0] >= self.window:
+                q.popleft()
+            if len(q) >= self.limit:
+                return max(0.1, self.window - (now - q[0]))
+            q.append(now)
+            return 0.0
 
 
-def predict(text: str) -> dict:
-    """Run prediction and return structured result."""
-    cleaned    = clean_text(text)
-    X          = vectorizer.transform([cleaned])
-    pred       = int(classifier.predict(X)[0])
-    risk_score = float(classifier.predict_risk_score(X)[0])
-
-    if risk_score < 0.35:
-        risk_level = "LOW"
-    elif risk_score < 0.65:
-        risk_level = "MEDIUM"
-    else:
-        risk_level = "HIGH"
-
-    return {
-        "prediction": "FAKE" if pred == 1 else "REAL",
-        "is_fake":    pred == 1,
-        "risk_score": round(risk_score, 4),
-        "risk_pct":   round(risk_score * 100, 1),
-        "risk_level": risk_level,
-    }
+class APIError(Exception):
+    def __init__(self, message: str, status: int = 400, code: str = "bad_request"):
+        super().__init__(message)
+        self.message, self.status, self.code = message, status, code
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
-
-@app.route("/")
-def index():
-    return render_template("index.html")
-
-
-@app.route("/api/verify-url", methods=["POST"])
-def verify_url():
-    data = request.get_json()
-    url  = (data or {}).get("url", "").strip()
-
-    if not url:
-        return jsonify({"error": "No URL provided"}), 400
-    if not validate_url(url):
-        return jsonify({"error": "Invalid URL. Make sure it starts with https://"}), 400
-
-    article = scrape_article(url)
-    if not article["success"]:
-        return jsonify({"error": article["error"] or "Could not extract article content"}), 422
-
-    result = predict(article["text_for_analysis"])
-    return jsonify({
-        **result,
-        "headline": article["headline"],
-        "source":   article["source"],
-        "preview":  article["body"][:200] + "..." if len(article.get("body","")) > 200 else article.get("body",""),
-        "url":      url,
-        "mode":     "url",
-    })
+def _json_body() -> dict:
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        raise APIError("Request body must be a JSON object.", 400, "invalid_json")
+    return data
 
 
-@app.route("/api/verify-text", methods=["POST"])
-def verify_text():
-    data = request.get_json()
-    text = (data or {}).get("text", "").strip()
+def _string_field(data: dict, name: str) -> str:
+    value = data.get(name, "")
+    if not isinstance(value, str):
+        raise APIError(f"'{name}' must be a string.", 400, "invalid_field")
+    return value.strip()
 
-    if not text or len(text) < 5:
-        return jsonify({"error": "Please enter a headline or text to analyse"}), 400
 
-    # ── Layer 1: ML model (fast baseline) ──
-    ml_result = predict(text)
+def create_app(settings: Settings = None, predictor: Predictor = None,
+               llm_client: GroqClient = None) -> Flask:
+    """Application factory. Fails fast if the trained model is missing."""
+    if settings is None:
+        load_dotenv()
+        settings = Settings.from_env()
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+                            format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
-    # ── Layer 2: Groq LLM (deep analysis) ──
-    llm = groq_analyse(text, mode="text")
+    if predictor is None:
+        predictor = Predictor.load(settings.models_dir)
+    if llm_client is None:
+        llm_client = GroqClient(settings.groq_api_key, settings.groq_model,
+                                settings.groq_endpoint, settings.groq_timeout,
+                                settings.groq_max_retries)
+    analyzer = Analyzer(predictor, llm_client)
+    limiter = RateLimiter(settings.rate_limit_per_minute)
 
-    # ── Merge: LLM verdict overrides ML when available ──
-    if llm:
-        # Map LLM verdict to is_fake / risk_score
-        verdict_map = {
-            "FAKE":        (True,  0.92),
-            "LIKELY FAKE": (True,  0.72),
-            "UNCERTAIN":   (False, 0.50),
-            "LIKELY REAL": (False, 0.25),
-            "REAL":        (False, 0.08),
-        }
-        is_fake, risk = verdict_map.get(llm["verdict"], (ml_result["is_fake"], ml_result["risk_score"]))
-        risk_level = "HIGH" if risk > 0.65 else "MEDIUM" if risk > 0.35 else "LOW"
+    app = Flask(__name__)
+    app.config.update(MAX_CONTENT_LENGTH=64 * 1024)
+    app.json.sort_keys = False  # keep the documented field order in API responses
+    asset_version = _asset_version(app.static_folder)
+    app.extensions["truthlens"] = {"settings": settings, "predictor": predictor,
+                                   "analyzer": analyzer, "limiter": limiter}
 
-        return jsonify({
-            **ml_result,                          # keep ML fields as base
-            "is_fake":              is_fake,
-            "prediction":           "FAKE" if is_fake else "REAL",
-            "risk_score":           risk,
-            "risk_pct":             round(risk * 100, 1),
-            "risk_level":           risk_level,
-            "headline":             text[:120],
-            "mode":                 "text",
-            # ── New LLM fields ──
-            "llm_verdict":          llm["verdict"],
-            "llm_confidence":       llm.get("confidence", 0),
-            "credibility_score":    llm.get("credibility_score", 0),
-            "summary":              llm.get("summary", ""),
-            "red_flags":            llm.get("red_flags", []),
-            "green_flags":          llm.get("green_flags", []),
-            "detected_techniques":  llm.get("detected_techniques", []),
-            "fact_check_suggestions": llm.get("fact_check_suggestions", []),
-            "reasoning":            llm.get("reasoning", ""),
-            "analysis_source":      "groq+ml",
-        })
+    if settings.trust_proxy:
+        from werkzeug.middleware.proxy_fix import ProxyFix
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-    # ── Groq unavailable: return ML result only ──
-    return jsonify({
-        **ml_result,
-        "headline":        text[:120],
-        "mode":            "text",
-        "analysis_source": "ml_only",
-    })
+    log.info("Model loaded: %s (demo=%s) | LLM layer: %s",
+             predictor.card.get("model_name", "unknown"), predictor.card.get("is_demo", False),
+             f"enabled ({settings.groq_model})" if llm_client.enabled else "disabled")
+
+    # ── Request lifecycle ────────────────────────────────────────────────────
+
+    @app.before_request
+    def _start():
+        g.started = time.monotonic()
+        incoming = request.headers.get("X-Request-ID", "")
+        g.request_id = incoming if _REQUEST_ID_RE.match(incoming) else uuid.uuid4().hex[:16]
+
+    @app.after_request
+    def _finish(resp):
+        resp.headers["X-Request-ID"] = g.get("request_id", "-")
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        resp.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        resp.headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
+        if request.path.startswith("/api/"):
+            resp.headers["Cache-Control"] = "no-store"
+        # Never log submitted text/URLs — they may be private.
+        log.info("request id=%s method=%s path=%s status=%s ms=%d",
+                 g.get("request_id", "-"), request.method, request.path, resp.status_code,
+                 int((time.monotonic() - g.get("started", time.monotonic())) * 1000))
+        return resp
+
+    def _rate_limit():
+        retry = limiter.hit(RateLimiter.client_key(request.remote_addr or ""))
+        if retry:
+            err = APIError("Too many requests — please wait a moment and try again.",
+                           429, "rate_limited")
+            err.retry_after = int(retry) + 1
+            raise err
+
+    # ── Errors (JSON for the API) ────────────────────────────────────────────
+
+    @app.errorhandler(APIError)
+    def _api_error(e: APIError):
+        resp = jsonify({"error": e.message, "code": e.code, "request_id": g.get("request_id")})
+        resp.status_code = e.status
+        if getattr(e, "retry_after", None):
+            resp.headers["Retry-After"] = str(e.retry_after)
+        return resp
+
+    @app.errorhandler(HTTPException)
+    def _http_error(e: HTTPException):
+        if not request.path.startswith("/api/"):
+            return e
+        messages = {413: "Request is too large.", 404: "Not found.",
+                    405: "Method not allowed."}
+        resp = jsonify({"error": messages.get(e.code, e.description), "code": e.name.lower()
+                        .replace(" ", "_"), "request_id": g.get("request_id")})
+        resp.status_code = e.code
+        return resp
+
+    @app.errorhandler(Exception)
+    def _unhandled(e: Exception):
+        log.exception("Unhandled error id=%s", g.get("request_id", "-"))
+        return jsonify({"error": "Internal server error.", "code": "internal_error",
+                        "request_id": g.get("request_id")}), 500
+
+    # ── Routes ───────────────────────────────────────────────────────────────
+
+    @app.get("/")
+    def index():
+        return render_template("index.html", version=__version__, asset_version=asset_version)
+
+    @app.get("/healthz")
+    def healthz():
+        return jsonify({"status": "ok"})
+
+    @app.get("/readyz")
+    def readyz():
+        return jsonify({"status": "ready", "model_loaded": True,
+                        "llm_enabled": llm_client.enabled})
+
+    @app.get("/api/model-info")
+    def model_info():
+        return jsonify({**predictor.info(), "llm_enabled": llm_client.enabled,
+                        "llm_model": settings.groq_model if llm_client.enabled else None,
+                        "version": __version__})
+
+    @app.post("/api/verify-text")
+    def verify_text():
+        _rate_limit()
+        text = _string_field(_json_body(), "text")
+        if len(text) < MIN_TEXT_CHARS:
+            raise APIError("Please enter a headline or text to analyse (at least 5 characters).",
+                           400, "text_too_short")
+        if len(text) > settings.max_text_chars:
+            raise APIError(f"Text is too long — please keep it under "
+                           f"{settings.max_text_chars:,} characters.", 400, "text_too_long")
+        # The classifier was trained on headlines: score the first line/sentence block,
+        # give the LLM the whole text.
+        first_line = text.splitlines()[0].strip() or text
+        result = analyzer.analyse(ml_text=first_line[:500], llm_text=text, mode="text",
+                                  meta={"headline": first_line[:160]})
+        return jsonify(result)
+
+    @app.post("/api/verify-url")
+    def verify_url():
+        _rate_limit()
+        url = _string_field(_json_body(), "url")
+        if not url:
+            raise APIError("Please paste a news article URL.", 400, "url_missing")
+        if len(url) > MAX_URL_CHARS or not validate_url(url):
+            raise APIError("That doesn't look like a valid web address "
+                           "(e.g. https://www.bbc.com/news/...).", 400, "invalid_url")
+
+        article = scrape_article(url, timeout=settings.scrape_timeout,
+                                 max_bytes=settings.scrape_max_bytes,
+                                 allow_private=settings.allow_private_urls)
+        if not article["success"]:
+            raise APIError(article["error"] or "Could not extract article content.",
+                           422, "fetch_failed")
+
+        headline = article["headline"] or article["body"][:200]
+        llm_text = f"{article['headline']}\n\n{article['body']}".strip()
+        result = analyzer.analyse(
+            ml_text=headline, llm_text=llm_text, mode="url",
+            meta={"headline": article["headline"], "source": article["source"],
+                  "url": article["url"], "preview": article["preview"]})
+        return jsonify(result)
+
+    return app
 
 
 if __name__ == "__main__":
-    load_models()
-    print("\n🚀  Starting Fake News Detector...")
-    print("🌐  Open http://localhost:5000 in your browser\n")
-    app.run(debug=False, host="0.0.0.0", port=5000)
+    load_dotenv()
+    try:
+        application = create_app()
+    except ModelNotFoundError as e:
+        print(f"\n❌  {e}\n")
+        sys.exit(1)
+    port = int(os.environ.get("PORT", "5000"))
+    print(f"\n🚀  TruthLens running → http://localhost:{port}\n")
+    application.run(debug=False, host=os.environ.get("HOST", "127.0.0.1"), port=port)

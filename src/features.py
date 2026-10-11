@@ -4,12 +4,12 @@ features.py
 TF-IDF feature extraction pipeline.
 """
 
+import os
+from typing import List, Tuple
+
+import joblib
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.pipeline import Pipeline
-import joblib
-import os
-from typing import Tuple, List
 
 
 class TFIDFExtractor:

@@ -1,26 +1,38 @@
 """
 data_loader.py
 --------------
-Dataset generation and loading for the Fake News Detection pipeline.
+Dataset acquisition and loading for the Fake News Detection pipeline.
 
-Since the original WELFake/LIAR datasets require registration, this module
-generates a realistic synthetic dataset with authentic linguistic patterns
-drawn from research literature on fake vs. real news characteristics.
+Two sources are supported:
+
+* ``fakenewsnet`` (default, used to train the served model) — ~23k real news
+  headlines labelled through PolitiFact and GossipCop fact-checks
+  (Shu et al., "FakeNewsNet", 2018; https://github.com/KaiDMML/FakeNewsNet).
+* ``synthetic`` — template-generated headlines. Only useful as a fast, offline
+  fixture for tests and smoke runs: a model trained on it learns the templates,
+  not misinformation, and must never be served as a detector.
 """
 
+import hashlib
 import os
 import random
-import pandas as pd
-import numpy as np
 from pathlib import Path
+from typing import Dict, Optional
 
+import pandas as pd
 
-# Seed for reproducibility
 SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
 
-# ── Linguistic building blocks ──────────────────────────────────────────────
+FAKENEWSNET_BASE_URL = "https://raw.githubusercontent.com/KaiDMML/FakeNewsNet/master/dataset"
+FAKENEWSNET_FILES = {
+    # file stem: (subset, label)  — label 1 = fake, 0 = real
+    "politifact_fake": ("politifact", 1),
+    "politifact_real": ("politifact", 0),
+    "gossipcop_fake": ("gossipcop", 1),
+    "gossipcop_real": ("gossipcop", 0),
+}
+
+# ── Synthetic templates (test fixture only) ─────────────────────────────────
 
 REAL_TEMPLATES = [
     "{source} reports {subject} amid {context}",
@@ -107,91 +119,163 @@ SOURCES = [
 ]
 
 
-def _fill_template(template: str) -> str:
+def _fill_template(template: str, rng: random.Random) -> str:
     """Fill a headline template with random components."""
+    c = rng.choice
     return template.format(
-        source=random.choice(SOURCES),
-        subject=random.choice(SUBJECTS),
-        context=random.choice(EVENTS),
-        policy=random.choice(TOPICS),
-        event=random.choice(EVENTS),
-        finding=random.choice(FINDINGS),
-        cause=random.choice(TOPICS),
-        official=random.choice(OFFICIALS),
-        action=random.choice(["resign", "testify", "respond", "act", "intervene"]),
-        country=random.choice(["US", "UK", "Germany", "France", "Japan", "India"]),
-        document=random.choice(["white paper", "report", "statement", "brief"]),
-        topic=random.choice(TOPICS),
-        study=random.choice(["study", "trial", "meta-analysis", "survey"]),
-        organization=random.choice(["WHO", "IMF", "UN", "OECD", "WTO"]),
-        decision=random.choice(["in favor", "against", "to uphold", "to overturn"]),
-        partner=random.choice(["EU", "China", "NATO", "ASEAN", "G20"]),
-        outcome=random.choice(["reduce costs", "save lives", "boost growth"]),
-        incident=random.choice(["data breach", "protest", "accident", "outage"]),
-        company=random.choice(["major tech firm", "leading bank", "energy company"]),
-        venue=random.choice(["Davos", "G20 summit", "UN Assembly", "Brussels"]),
-        conspiracy=random.choice(CONSPIRACIES),
-        celebrity=random.choice(CELEBRITIES),
-        disease=random.choice(["cancer", "diabetes", "Alzheimer's", "arthritis"]),
-        scandal=random.choice(["financial misconduct", "cover-up", "secret deal"]),
-        government=random.choice(["Deep State", "shadow government", "elites", "globalists"]),
+        source=c(SOURCES),
+        subject=c(SUBJECTS),
+        context=c(EVENTS),
+        policy=c(TOPICS),
+        event=c(EVENTS),
+        finding=c(FINDINGS),
+        cause=c(TOPICS),
+        official=c(OFFICIALS),
+        action=c(["resign", "testify", "respond", "act", "intervene"]),
+        country=c(["US", "UK", "Germany", "France", "Japan", "India"]),
+        document=c(["white paper", "report", "statement", "brief"]),
+        topic=c(TOPICS),
+        study=c(["study", "trial", "meta-analysis", "survey"]),
+        organization=c(["WHO", "IMF", "UN", "OECD", "WTO"]),
+        decision=c(["in favor", "against", "to uphold", "to overturn"]),
+        partner=c(["EU", "China", "NATO", "ASEAN", "G20"]),
+        outcome=c(["reduce costs", "save lives", "boost growth"]),
+        incident=c(["data breach", "protest", "accident", "outage"]),
+        company=c(["major tech firm", "leading bank", "energy company"]),
+        venue=c(["Davos", "G20 summit", "UN Assembly", "Brussels"]),
+        conspiracy=c(CONSPIRACIES),
+        celebrity=c(CELEBRITIES),
+        disease=c(["cancer", "diabetes", "Alzheimer's", "arthritis"]),
+        scandal=c(["financial misconduct", "cover-up", "secret deal"]),
+        government=c(["Deep State", "shadow government", "elites", "globalists"]),
     )
 
 
-def generate_dataset(n_samples: int = 5000, save_path: str = None) -> pd.DataFrame:
+def generate_dataset(n_samples: int = 5000, save_path: str = None,
+                     seed: int = SEED) -> pd.DataFrame:
     """
-    Generate a realistic fake/real news headline dataset.
-
-    Parameters
-    ----------
-    n_samples : int
-        Total number of samples (split 50/50 fake/real).
-    save_path : str, optional
-        If provided, saves CSV to this path.
+    Generate a synthetic, template-based headline dataset (test fixture only).
 
     Returns
     -------
     pd.DataFrame with columns: ['text', 'label'] where label 0=real, 1=fake
     """
-    print(f"[DataLoader] Generating {n_samples} news headlines...")
-
+    rng = random.Random(seed)
     half = n_samples // 2
     records = []
 
-    # Generate REAL headlines (label = 0)
     for _ in range(half):
-        template = random.choice(REAL_TEMPLATES)
-        headline = _fill_template(template)
-        # Real news: slightly longer, more measured
-        if random.random() > 0.7:
-            headline = headline + ", " + random.choice([
+        headline = _fill_template(rng.choice(REAL_TEMPLATES), rng)
+        if rng.random() > 0.7:
+            headline = headline + ", " + rng.choice([
                 "officials say", "sources confirm", "data shows",
                 "report finds", "experts note",
             ])
         records.append({"text": headline, "label": 0})
 
-    # Generate FAKE headlines (label = 1)
-    for _ in range(half):
-        template = random.choice(FAKE_TEMPLATES)
-        headline = _fill_template(template)
-        records.append({"text": headline, "label": 1})
+    for _ in range(n_samples - half):
+        records.append({"text": _fill_template(rng.choice(FAKE_TEMPLATES), rng), "label": 1})
 
-    df = pd.DataFrame(records)
-    df = df.sample(frac=1, random_state=SEED).reset_index(drop=True)
+    df = pd.DataFrame(records).sample(frac=1, random_state=seed).reset_index(drop=True)
 
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         df.to_csv(save_path, index=False)
-        print(f"[DataLoader] Dataset saved → {save_path}")
-
-    print(f"[DataLoader] Dataset ready: {len(df)} rows | "
-          f"Real: {(df.label==0).sum()} | Fake: {(df.label==1).sum()}")
     return df
 
 
-def load_dataset(path: str) -> pd.DataFrame:
-    """Load dataset from CSV."""
+# ── FakeNewsNet ─────────────────────────────────────────────────────────────
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def download_fakenewsnet(data_dir: str, force: bool = False,
+                         timeout: float = 60.0) -> Dict[str, str]:
+    """
+    Download the four FakeNewsNet CSVs into ``data_dir``.
+
+    Files already present are reused (pass ``force=True`` to re-download).
+    Each file is streamed to a ``.part`` file and renamed only when complete,
+    so an interrupted download never leaves a truncated CSV behind.
+
+    Returns {file_stem: sha256} for provenance tracking.
+    """
+    import requests
+
+    target = Path(data_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    checksums = {}
+    for stem in FAKENEWSNET_FILES:
+        path = target / f"{stem}.csv"
+        if path.exists() and path.stat().st_size > 0 and not force:
+            print(f"[DataLoader] Using cached {path}")
+        else:
+            url = f"{FAKENEWSNET_BASE_URL}/{stem}.csv"
+            print(f"[DataLoader] Downloading {url}")
+            part = path.with_suffix(".csv.part")
+            with requests.get(url, stream=True, timeout=timeout) as resp:
+                resp.raise_for_status()
+                with open(part, "wb") as fh:
+                    for chunk in resp.iter_content(chunk_size=1 << 16):
+                        fh.write(chunk)
+            os.replace(part, path)
+        checksums[stem] = _sha256(path)
+    return checksums
+
+
+def load_fakenewsnet(data_dir: str) -> pd.DataFrame:
+    """
+    Load FakeNewsNet headlines as a clean, de-duplicated DataFrame.
+
+    * keeps only the title (the URL/domain would leak the label)
+    * drops titles that appear with *both* labels (unresolvable noise)
+    * keeps one copy of each remaining duplicate title, so the same headline
+      can never land in both the train and the test split
+
+    Returns
+    -------
+    pd.DataFrame with columns ['text', 'label', 'subset'] (label 1 = fake)
+    """
+    frames = []
+    for stem, (subset, label) in FAKENEWSNET_FILES.items():
+        path = Path(data_dir) / f"{stem}.csv"
+        if not path.exists():
+            raise FileNotFoundError(
+                f"{path} not found — run `python main.py` (downloads automatically)"
+            )
+        part = pd.read_csv(path, usecols=["title"], dtype={"title": str})
+        part = part.rename(columns={"title": "text"})
+        part["label"] = label
+        part["subset"] = subset
+        frames.append(part)
+
+    df = pd.concat(frames, ignore_index=True)
+    df = df[df["text"].notna()].copy()
+    df["text"] = df["text"].astype(str).str.strip()
+    df = df[df["text"].str.len() > 0]
+
+    key = df["text"].str.lower().str.replace(r"\s+", " ", regex=True)
+    labels_per_title = df.groupby(key)["label"].nunique()
+    conflicting = set(labels_per_title[labels_per_title > 1].index)
+    keep = ~key.isin(conflicting) & ~key.duplicated()
+    df = df[keep].reset_index(drop=True)
+    df["label"] = df["label"].astype(int)
+
+    print(f"[DataLoader] FakeNewsNet: {len(df):,} unique headlines | "
+          f"real: {(df.label == 0).sum():,} | fake: {(df.label == 1).sum():,} | "
+          f"dropped {len(conflicting)} conflicting titles")
+    return df
+
+
+def load_dataset(path: str, required: Optional[tuple] = ("text", "label")) -> pd.DataFrame:
+    """Load a labelled dataset from CSV (must contain 'text' and 'label' columns)."""
     df = pd.read_csv(path)
-    assert "text" in df.columns and "label" in df.columns, \
-        "CSV must have 'text' and 'label' columns"
+    missing = [c for c in (required or ()) if c not in df.columns]
+    if missing:
+        raise ValueError(f"CSV must have columns {list(required)}; missing {missing}")
     return df

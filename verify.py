@@ -1,118 +1,114 @@
 """
 verify.py
 ---------
-Interactive Fake News Verifier — BIT Mesra 2024
+Command-line news verifier (same analysis as the web app).
 
 Usage:
     python verify.py                        # interactive menu
     python verify.py --url <URL>            # verify a URL
     python verify.py --text "headline"      # verify a headline
+    python verify.py --text "..." --json    # machine-readable output
+    python verify.py --no-llm ...           # skip the Groq LLM layer
 """
 
+import argparse
+import json
 import os
 import sys
-import argparse
 import warnings
-warnings.filterwarnings("ignore")
 
-sys.path.insert(0, os.path.dirname(__file__))
+from dotenv import load_dotenv
 
-from src.preprocessor import clean_text
-from src.features     import TFIDFExtractor
-from src.models       import FakeNewsClassifier
-from src.scraper      import scrape_article, validate_url, SCRAPER_AVAILABLE
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-MODEL_PATH      = os.path.join("models", "svm_linear.pkl")
-VECTORIZER_PATH = os.path.join("models", "tfidf_vectorizer.pkl")
+from src.analysis import Analyzer  # noqa: E402
+from src.config import Settings  # noqa: E402
+from src.llm import GroqClient  # noqa: E402
+from src.predict import ModelNotFoundError, Predictor  # noqa: E402
+from src.scraper import scrape_article, validate_url  # noqa: E402
 
-RISK_THRESHOLDS = {
-    "LOW":    (0.00, 0.35),
-    "MEDIUM": (0.35, 0.65),
-    "HIGH":   (0.65, 1.01),
+LABELS = {
+    "LIKELY_FAKE": ("🔴", "LIKELY FAKE"),
+    "UNCERTAIN": ("🟡", "UNCERTAIN"),
+    "LIKELY_REAL": ("🟢", "LIKELY CREDIBLE"),
+    "INSUFFICIENT_SIGNAL": ("⚪", "NOT ENOUGH SIGNAL"),
 }
 
 
-def load_models():
-    if not os.path.exists(MODEL_PATH) or not os.path.exists(VECTORIZER_PATH):
-        print("\n❌  Models not found! Run  python main.py  first.\n")
+def build_analyzer(use_llm: bool = True):
+    load_dotenv()
+    settings = Settings.from_env()
+    try:
+        predictor = Predictor.load(settings.models_dir)
+    except ModelNotFoundError as e:
+        print(f"\n❌  {e}\n")
         sys.exit(1)
-    vectorizer = TFIDFExtractor.load(VECTORIZER_PATH)
-    classifier = FakeNewsClassifier.load(MODEL_PATH, "svm")
-    return vectorizer, classifier
+    llm = GroqClient(settings.groq_api_key if use_llm else "", settings.groq_model,
+                     settings.groq_endpoint, settings.groq_timeout, settings.groq_max_retries)
+    return Analyzer(predictor, llm), settings
 
 
-def interpret_risk(score):
-    for label, (lo, hi) in RISK_THRESHOLDS.items():
-        if lo <= score < hi:
-            return label
-    return "HIGH"
-
-
-def predict_text(text, vectorizer, classifier):
-    cleaned    = clean_text(text)
-    X          = vectorizer.transform([cleaned])
-    pred       = classifier.predict(X)[0]
-    risk_score = float(classifier.predict_risk_score(X)[0])
-    return {
-        "prediction": "FAKE" if pred == 1 else "REAL",
-        "risk_score": round(risk_score, 4),
-        "risk_level": interpret_risk(risk_score),
-    }
-
-
-def print_result(result, source_text, source_label="Input"):
-    is_fake      = result["prediction"] == "FAKE"
-    verdict_icon = "🔴" if is_fake else "🟢"
-    verdict      = "FAKE NEWS" if is_fake else "REAL NEWS"
-    score        = result["risk_score"]
-    risk         = result["risk_level"]
-    bar          = "█" * int(score * 20) + "░" * (20 - int(score * 20))
-
-    print("\n" + "═" * 62)
-    print(f"  {verdict_icon}  VERDICT: {verdict}")
-    print("═" * 62)
-    print(f"  {source_label:<14}: {source_text[:70]}")
-    print(f"  {'Risk Score':<14}: {score:.4f}  [{bar}]  {risk} RISK")
-    print("─" * 62)
-
-    if is_fake:
-        msg = "⚠️  Strong indicators of misinformation detected." if risk == "HIGH" \
-              else "⚠️  Possible misinformation — verify with trusted sources."
+def print_result(result: dict):
+    icon, label = LABELS.get(result["verdict"], ("⚪", result["verdict"]))
+    ml, llm = result["ml"], result["llm"]
+    print("\n" + "═" * 64)
+    print(f"  {icon}  VERDICT: {label}   (basis: {result['verdict_basis']})")
+    print("═" * 64)
+    if result.get("source"):
+        print(f"  Source        : {result['source']}")
+    print(f"  Headline      : {(result.get('headline') or '')[:70]}")
+    if ml["risk_score"] is None:
+        print("  ML signal     : no known vocabulary — cannot score")
     else:
-        msg = "✅  Content appears consistent with credible reporting." if risk == "LOW" \
-              else "🟡  Likely real, but treat with moderate caution."
+        bar = "█" * int(ml["risk_score"] * 20) + "░" * (20 - int(ml["risk_score"] * 20))
+        print(f"  ML signal     : P(fake) {ml['risk_score']:.3f} [{bar}] {ml['risk_level']}")
+        fake_terms = ", ".join(t["term"] for t in ml["explanation"]["toward_fake"][:4])
+        real_terms = ", ".join(t["term"] for t in ml["explanation"]["toward_real"][:4])
+        if fake_terms:
+            print(f"    ↑ fake-like : {fake_terms}")
+        if real_terms:
+            print(f"    ↓ real-like : {real_terms}")
+    if llm["status"] == "ok":
+        print(f"  AI assessment : {llm['verdict']} (credibility {llm['credibility_score']}/100, "
+              f"confidence {llm['confidence']}/100)")
+        if llm.get("summary"):
+            print(f"    {llm['summary']}")
+        for claim in llm.get("fact_check_suggestions", [])[:3]:
+            print(f"    • verify: {claim}")
+    else:
+        print(f"  AI assessment : {llm['status']}")
+    for note in result.get("notes", []):
+        print(f"  ⚠ {note}")
+    print("─" * 64)
+    print("  ℹ  Signals, not proof — always cross-check with trusted sources.")
+    print("═" * 64 + "\n")
 
-    print(f"\n  {msg}")
-    print("\n  ℹ️  This is a text classifier — always cross-check with trusted sources.")
-    print("═" * 62 + "\n")
 
-
-def verify_url(url, vectorizer, classifier):
-    print(f"\n  🌐 Fetching: {url}\n  ⏳ Please wait...\n")
-    article = scrape_article(url)
+def verify_url(url, analyzer, settings, as_json=False):
+    if not validate_url(url):
+        print("  ❌ Invalid URL.")
+        return None
+    article = scrape_article(url, timeout=settings.scrape_timeout,
+                             max_bytes=settings.scrape_max_bytes,
+                             allow_private=settings.allow_private_urls)
     if not article["success"]:
-        print(f"\n  ❌ {article['error']}")
-        print("  💡 Try pasting the headline manually instead.\n")
-        return
-    print(f"  📰 Source  : {article['source']}")
-    print(f"  📌 Headline: {article['headline'][:80]}")
-    result = predict_text(article["text_for_analysis"], vectorizer, classifier)
-    print_result(result, article["headline"] or url, "Headline")
+        print(f"\n  ❌ {article['error']}\n  💡 Try pasting the headline instead.\n")
+        return None
+    result = analyzer.analyse(
+        ml_text=article["headline"] or article["body"][:200],
+        llm_text=f"{article['headline']}\n\n{article['body']}".strip(), mode="url",
+        meta={k: article[k] for k in ("headline", "source", "url", "preview")})
+    print(json.dumps(result, indent=2)) if as_json else print_result(result)
+    return result
 
 
-def verify_text(text, vectorizer, classifier):
-    result = predict_text(text, vectorizer, classifier)
-    print_result(result, text, "Input")
+def verify_text(text, analyzer, as_json=False):
+    first_line = text.strip().splitlines()[0] if text.strip() else text
+    result = analyzer.analyse(ml_text=first_line[:500], llm_text=text, mode="text",
+                              meta={"headline": first_line[:160]})
+    print(json.dumps(result, indent=2)) if as_json else print_result(result)
+    return result
 
-
-BANNER = """
-╔══════════════════════════════════════════════════════════╗
-║              🔍 FAKE NEWS VERIFIER                       ║
-║                                                          ║
-║  Paste a news URL or type a headline to check if it's    ║
-║  real or fake. Type  exit  to quit.                      ║
-╚══════════════════════════════════════════════════════════╝
-"""
 
 MENU = """
   [1] Paste a news URL
@@ -122,31 +118,22 @@ MENU = """
 """
 
 
-def interactive_mode(vectorizer, classifier):
-    print(BANNER)
-    if not SCRAPER_AVAILABLE:
-        print("  ⚠️  URL scraping unavailable. Run: pip install requests beautifulsoup4\n")
+def interactive_mode(analyzer, settings):
+    print("\n  🔍 TruthLens verifier — paste a URL or headline. Type 0 to quit.")
     while True:
         print(MENU)
         choice = input("  Enter choice: ").strip()
         if choice in ("0", "exit", "quit", "q"):
             print("\n  👋 Goodbye!\n")
             break
-        elif choice == "1":
-            if not SCRAPER_AVAILABLE:
-                print("\n  ❌ Install requests & beautifulsoup4 first.\n")
-                continue
-            url = input("\n  🌐 Paste URL: ").strip()
-            if not validate_url(url):
-                print("  ❌ Invalid URL.\n")
-                continue
-            verify_url(url, vectorizer, classifier)
+        if choice == "1":
+            verify_url(input("\n  🌐 Paste URL: ").strip(), analyzer, settings)
         elif choice == "2":
             text = input("\n  📝 Paste headline: ").strip()
             if len(text) < 5:
                 print("  ❌ Too short.\n")
                 continue
-            verify_text(text, vectorizer, classifier)
+            verify_text(text, analyzer)
         elif choice == "3":
             print("\n  Enter headlines one per line. Type DONE when finished.\n")
             headlines = []
@@ -158,23 +145,32 @@ def interactive_mode(vectorizer, classifier):
                     headlines.append(line)
             for i, h in enumerate(headlines, 1):
                 print(f"\n  [{i}/{len(headlines)}]")
-                verify_text(h, vectorizer, classifier)
+                verify_text(h, analyzer)
         else:
             print("  ❌ Invalid choice.\n")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Fake News Verifier")
-    parser.add_argument("--url",  type=str)
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="TruthLens fake news verifier")
+    parser.add_argument("--url", type=str)
     parser.add_argument("--text", type=str)
-    args = parser.parse_args()
-    vectorizer, classifier = load_models()
+    parser.add_argument("--json", action="store_true", help="print the raw JSON result")
+    parser.add_argument("--no-llm", action="store_true", help="skip the Groq LLM layer")
+    args = parser.parse_args(argv)
+    warnings.filterwarnings("ignore", category=RuntimeWarning)
+    if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+
+    analyzer, settings = build_analyzer(use_llm=not args.no_llm)
     if args.url:
-        verify_url(args.url, vectorizer, classifier)
+        verify_url(args.url, analyzer, settings, args.json)
     elif args.text:
-        verify_text(args.text, vectorizer, classifier)
+        verify_text(args.text, analyzer, args.json)
     else:
-        interactive_mode(vectorizer, classifier)
+        interactive_mode(analyzer, settings)
 
 
 if __name__ == "__main__":

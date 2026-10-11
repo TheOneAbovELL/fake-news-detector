@@ -5,14 +5,21 @@ Model evaluation: metrics, confusion matrix, classification reports.
 Frames evaluation as a risk modeling problem.
 """
 
+from typing import Any, Dict
+
 import numpy as np
 import pandas as pd
 from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score,
-    confusion_matrix, classification_report, roc_auc_score,
-    roc_curve, average_precision_score
+    accuracy_score,
+    average_precision_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    roc_curve,
 )
-from typing import Dict, Any
 
 
 def compute_metrics(y_true, y_pred, y_prob=None) -> Dict[str, Any]:
@@ -69,12 +76,12 @@ def print_evaluation_report(model_name: str, metrics: Dict[str, Any]):
     print(f"  F1-Score    : {metrics['f1']:.4f}")
     if "roc_auc" in metrics:
         print(f"  ROC-AUC     : {metrics['roc_auc']:.4f}")
-    print(f"\n  ── Confusion Matrix ──")
+    print("\n  ── Confusion Matrix ──")
     print(f"     TP (fake caught)    : {metrics['true_positives']}")
     print(f"     FP (real flagged)   : {metrics['false_positives']}  ← censorship risk")
     print(f"     TN (real passed)    : {metrics['true_negatives']}")
     print(f"     FN (fake missed)    : {metrics['false_negatives']}  ← misinformation risk")
-    print(f"\n  ── Risk Scores ──")
+    print("\n  ── Risk Scores ──")
     print(f"     Misinformation Risk : {metrics['misinformation_risk']:.4f}")
     print(f"     Censorship Risk     : {metrics['censorship_risk']:.4f}")
     print(sep)
@@ -123,3 +130,54 @@ def compare_models(results: Dict[str, Dict]) -> pd.DataFrame:
         })
     df = pd.DataFrame(rows).set_index("Model")
     return df
+
+
+def compute_subset_metrics(y_true, y_prob, subsets, threshold: float = 0.5) -> Dict[str, Dict]:
+    """
+    Per-subset metrics (e.g. PolitiFact vs GossipCop) — an aggregate score can
+    hide that a model is much weaker on one kind of news.
+    """
+    y_true = np.asarray(y_true)
+    y_prob = np.asarray(y_prob)
+    subsets = np.asarray(subsets)
+    out = {}
+    for name in sorted(set(subsets.tolist())):
+        m = subsets == name
+        yt, yp = y_true[m], y_prob[m]
+        y_hat = (yp >= threshold).astype(int)
+        row = {
+            "n": int(m.sum()),
+            "fake_share": round(float(yt.mean()), 4),
+            "accuracy": round(float(accuracy_score(yt, y_hat)), 4),
+            "f1_fake": round(float(f1_score(yt, y_hat, zero_division=0)), 4),
+        }
+        if len(set(yt.tolist())) == 2:
+            row["roc_auc"] = round(float(roc_auc_score(yt, yp)), 4)
+        out[str(name)] = row
+    return out
+
+
+def compute_band_metrics(y_true, y_prob, low: float, high: float) -> Dict[str, Dict]:
+    """
+    How the served three-way verdict behaves on held-out data.
+
+    For each band (likely real / uncertain / likely fake) reports the share of
+    texts that land there and the share of those that are actually fake — i.e.
+    how often a "LIKELY FAKE" verdict is right.
+    """
+    y_true = np.asarray(y_true)
+    y_prob = np.asarray(y_prob)
+    bands = {
+        "likely_real": y_prob < low,
+        "uncertain": (y_prob >= low) & (y_prob < high),
+        "likely_fake": y_prob >= high,
+    }
+    out = {}
+    for name, m in bands.items():
+        n = int(m.sum())
+        out[name] = {
+            "share": round(n / len(y_true), 4) if len(y_true) else 0.0,
+            "n": n,
+            "actually_fake": round(float(y_true[m].mean()), 4) if n else None,
+        }
+    return out

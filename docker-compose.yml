@@ -1,0 +1,16 @@
+# docker compose up --build   →  http://localhost:8000
+services:
+  truthlens:
+    build: .
+    image: truthlens:latest
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env          # optional: GROQ_API_KEY etc.
+        required: false
+    environment:
+      LOG_LEVEL: INFO
+    read_only: true
+    tmpfs:
+      - /tmp
+    restart: unless-stopped

@@ -5,22 +5,23 @@ Unit tests for the Fake News Detection pipeline.
 Run with: pytest tests/ -v
 """
 
-import sys
 import os
-import pytest
+import sys
+import warnings
+
 import numpy as np
 import pandas as pd
-import warnings
+import pytest
+
 warnings.filterwarnings("ignore")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.data_loader   import generate_dataset
-from src.preprocessor  import clean_text, preprocess_dataframe
-from src.features      import TFIDFExtractor
-from src.models        import FakeNewsClassifier
-from src.evaluate      import compute_metrics
-
+from src.data_loader import generate_dataset
+from src.evaluate import compute_metrics
+from src.features import TFIDFExtractor
+from src.models import FakeNewsClassifier
+from src.preprocessor import clean_text, preprocess_dataframe
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
